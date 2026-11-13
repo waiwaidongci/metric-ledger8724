@@ -48,9 +48,11 @@ docker compose exec -T backend python -m scripts.seed_demo
 
 ## 真实计算
 
-**指标表达式与依赖DAG**：`backend/src/services/expression_service.py` 使用Python `ast.parse`，只允许字段、有限数值常量、括号、加减乘除、正负号。禁止eval/exec、函数调用、属性访问、下标、幂和布尔常量；最多50语法节点。来源字段仅revenue/cost/refunds/orders，派生指标不能覆盖来源。深度优先拓扑排序检测环路，未知引用在登记阶段422拒绝；还会用现有渠道/月与区域/月数据试算，零分母当场422拒绝。逐节点执行算术，分母绝对值小于1e-12或结果非有限/超范围时明确失败。
+**指标表达式与依赖DAG**：`backend/src/services/expression_service.py` 使用Python `ast.parse`，只允许字段、有限数值常量、括号、加减乘除、正负号。禁止eval/exec、函数调用、属性访问、下标、幂和布尔常量；最多50语法节点。来源字段仅revenue/cost/refunds/orders，派生指标不能覆盖来源。深度优先拓扑排序检测环路，未知引用在登记阶段422拒绝；登记前还用现有渠道/月与区域/月数据做严格试算，零分母当场422拒绝。逐节点执行算术，分母绝对值小于1e-12或结果非有限/超范围时明确失败。
 
-**透视与差异归因**：`pivot_service.py` 先按1–2个不重复维度（channel/month/region）分组，把原始金额、单数加总，再沿DAG计算派生指标。总计行重新汇总原始字段计算，绝不累加或简单平均比率。差异为来源`sum(revenue)-sum(refunds)`减`sum(reference_net)`；绝对差异大于0.01元的单元按绝对值降序归因。source_count和SHA256支持复算，输出保留6位小数。
+报表生成走容错路径 `calculate_tolerant`：某维度单元出现零分母（如渠道整月无订单导致每单净收入除零）不会让整份报表失败。该单元的金额、参考差异、明细数等可算指标照常保留；算不出的指标值为JSON `null` 并在 `uncomputable` 中附原因，其下游依赖沿DAG传播为「依赖指标 x 不可计算」，绝不以零填充。真实零值（如无退款时退款率为0）仍是数字0，与不可计算严格区分。手工报表、定时交付与来源对账共用同一套规则；已归档报表的快照JSON不变，新规则只作用于新生成的结果。
+
+**透视与差异归因**：`pivot_service.py` 先按1–2个不重复维度（channel/month/region）分组，把原始金额、单数加总，再沿DAG容错计算派生指标，问题只隔离在对应单元与指标，其他渠道单元不受影响。总计行用全部来源重新汇总原始字段独立重算，绝不累加或简单平均比率，也不沿用单元的不可计算状态；若合计自身分母为零才标记不可计算。差异为来源`sum(revenue)-sum(refunds)`减`sum(reference_net)`；绝对差异大于0.01元的单元按绝对值降序归因。source_count和SHA256支持复算，输出保留6位小数。CSV导出对不可计算指标写出「不可计算（原因）」，真实零值写出0，页面同样区分二者并悬浮展示原因。
 
 五项种子定义：net_revenue=revenue-refunds；gross_profit=net_revenue-cost；margin_rate=gross_profit/net_revenue；net_per_order=net_revenue/orders；refund_rate=refunds/revenue。比率单位为小数，界面显示4位。
 
@@ -100,7 +102,7 @@ docker compose down -v --remove-orphans
 
 外置测试与截图位于`../../test-artifacts/gb-0005/`，含算法、API、真实周期和浏览器证据。源码不含截图/测试报告/日志，`.env`与日志不提交。
 
-目前面向本地合成研究：无文件上传/外部邮件/多租户隔离；仅支持算术口径，不支持任意SQL或函数。单worker调度不提供多实例分布式锁；running任务崩溃需重新提交，数据库事务与Redis入队之间无事务outbox。金额采用浮点并在输出舍入，非财务总账记账引擎。表达式以当前定义计算且结果保存快照；未提供已注册指标编辑/删除，现有数据试算通过后才能登记，后续来源变化仍可能造成任务失败，结果页会显示错误。来源页最多预览100行，计算用全部来源。Google Fonts无网络会回退字体。
+目前面向本地合成研究：无文件上传/外部邮件/多租户隔离；仅支持算术口径，不支持任意SQL或函数。单worker调度不提供多实例分布式锁；running任务崩溃需重新提交，数据库事务与Redis入队之间无事务outbox。金额采用浮点并在输出舍入，非财务总账记账引擎。表达式以当前定义计算且结果保存快照；未提供已注册指标编辑/删除，现有数据严格试算通过后才能登记。后续来源变化若造成个别单元零分母，任务不再整体失败：可算指标照常给出，不可计算指标及下游标记原因、不以零填充，合计按全部来源独立重算，结果页与导出明确区分不可计算与真实零值。来源页最多预览100行，计算用全部来源。Google Fonts无网络会回退字体。
 
 ## License
 
